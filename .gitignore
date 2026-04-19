@@ -1,0 +1,10 @@
+target/
+*.class
+.mvn/
+.idea/
+*.iml
+*.log
+.DS_Store
+.env
+bin/
+out/
