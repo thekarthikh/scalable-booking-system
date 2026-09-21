@@ -1,0 +1,75 @@
+server:
+  port: ${SERVER_PORT:8083}
+  tomcat:
+    threads:
+      max: 400
+      min-spare: 50
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/bookingdb}
+    username: ${SPRING_DATASOURCE_USERNAME:bookinguser}
+    password: ${SPRING_DATASOURCE_PASSWORD:bookingpass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 100
+      minimum-idle: 20
+      connection-timeout: 3000
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 200
+          max-idle: 50
+          min-idle: 10
+          max-wait: 1000ms
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: inventory-service-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 100
+      fetch-min-size: 1
+      properties:
+        isolation.level: read_committed
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+logging:
+  level:
+    com.thekarthikh: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-}] %logger{36} - %msg%n"
