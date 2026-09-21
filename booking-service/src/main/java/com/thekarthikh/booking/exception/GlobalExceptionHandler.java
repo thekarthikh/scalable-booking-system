@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
 import java.util.stream.Collectors;
+import org.springframework.dao.DataIntegrityViolationException;
 
 @Slf4j
 @RestControllerAdvice
@@ -21,6 +22,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(DuplicateBookingException.class)
     public ResponseEntity<ApiError> handleDuplicate(DuplicateBookingException ex) {
+        return buildError(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    @ExceptionHandler(IdempotencyConflictException.class)
+    public ResponseEntity<ApiError> handleIdempotencyConflict(IdempotencyConflictException ex) {
         return buildError(HttpStatus.CONFLICT, ex.getMessage());
     }
 
@@ -39,6 +45,16 @@ public class GlobalExceptionHandler {
                         .message(ex.getMessage())
                         .timestamp(Instant.now())
                         .build());
+    }
+
+    @ExceptionHandler(DownstreamServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handleDownstreamUnavailable(DownstreamServiceUnavailableException ex) {
+        return buildError(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiError> handleDataIntegrity(DataIntegrityViolationException ex) {
+        return buildError(HttpStatus.CONFLICT, "Request conflicts with existing booking state");
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

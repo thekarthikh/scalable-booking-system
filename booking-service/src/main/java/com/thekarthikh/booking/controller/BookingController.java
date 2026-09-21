@@ -21,7 +21,8 @@ public class BookingController {
 
     /**
      * Create a new booking.
-     * The idempotency key in the request body guarantees exactly-once semantics.
+     * The idempotency key is bound to the first accepted request and supports
+     * safe client retries; downstream event delivery remains at-least-once.
      */
     @PostMapping
     public ResponseEntity<BookingResponse> createBooking(

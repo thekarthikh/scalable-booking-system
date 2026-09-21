@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 @Slf4j
 @Component
@@ -22,6 +23,7 @@ public class NotificationSagaListener {
             groupId = "notification-service-group",
             containerFactory = "kafkaListenerContainerFactory"
     )
+    @Transactional
     public void handleBookingEvent(ConsumerRecord<String, String> record) {
         try {
             SagaMessage message = objectMapper.readValue(record.value(), SagaMessage.class);
@@ -38,6 +40,11 @@ public class NotificationSagaListener {
                 return; // Ignore other events
             }
 
+            if (notificationRepository.existsByBookingIdAndType(message.getBookingId(), type)) {
+                log.debug("Notification already exists for bookingId={} type={}", message.getBookingId(), type);
+                return;
+            }
+
             Notification notification = Notification.builder()
                     .userId(message.getUserId())
                     .bookingId(message.getBookingId())
@@ -50,7 +57,7 @@ public class NotificationSagaListener {
             log.info("Saved notification for booking {}: {}", message.getBookingId(), content);
 
         } catch (Exception e) {
-            log.error("Error processing booking event in notification: {}", e.getMessage(), e);
+            throw new IllegalStateException("Unable to process notification event", e);
         }
     }
 }

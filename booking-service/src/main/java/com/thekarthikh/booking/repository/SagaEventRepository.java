@@ -14,6 +14,7 @@ public interface SagaEventRepository extends JpaRepository<SagaEvent, UUID> {
     List<SagaEvent> findByBookingId(UUID bookingId);
 
     /** Used by the outbox relay scheduler. */
-    @Query("SELECT e FROM SagaEvent e WHERE e.published = false ORDER BY e.createdAt ASC")
-    List<SagaEvent> findUnpublishedEvents();
+    @Query(value = "SELECT * FROM saga_events WHERE published = false ORDER BY created_at ASC LIMIT 100 FOR UPDATE SKIP LOCKED",
+            nativeQuery = true)
+    List<SagaEvent> findUnpublishedEventsForUpdate();
 }

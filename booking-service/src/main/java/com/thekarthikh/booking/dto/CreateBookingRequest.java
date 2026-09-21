@@ -18,8 +18,9 @@ public class CreateBookingRequest {
 
     /**
      * UUID v4 idempotency key — clients must generate this and include it on
-     * every request submission and any retries.  Ensures exactly-once booking
-     * semantics even under retry-storm conditions.
+     * every request submission and any retries.  The database uniqueness
+     * constraint makes repeated keys return the original booking rather than
+     * create another booking; Kafka processing remains at-least-once.
      */
     @NotBlank(message = "Idempotency key is required (UUID v4)")
     @Pattern(

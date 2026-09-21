@@ -3,6 +3,7 @@ package com.thekarthikh.booking.lock;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -11,15 +12,14 @@ import java.util.UUID;
 /**
  * Layer 2 of the 3-layer locking strategy: Redis Distributed Lock.
  *
- * Uses SET NX PX (atomic set-if-not-exists with millisecond expiry) so that
- * only one JVM instance across the cluster can hold the lock for a given
- * resource at a time. The lock value is a unique nonce so that only the
- * thread that acquired the lock can release it (prevents accidental release
- * on expiry race).
+ * Uses SET NX PX (atomic set-if-not-exists with millisecond expiry) as a
+ * best-effort single-Redis lease. The lock value is a unique nonce so that
+ * only the owner can release it while the lease is still present.
  *
  * Ordering of guarantees:
  *   Layer 1 (DB row lock)     – serialises within a single DB transaction.
- *   Layer 2 (Redis dist lock) – serialises across multiple service instances.
+ *   Layer 2 (Redis dist lock) – coordinates multiple service instances when
+ *                               the lease and Redis instance are healthy.
  *   Layer 3 (Optimistic lock) – catches any edge cases the redis lock misses
  *                               (e.g. lock TTL expiry during long transaction).
  */
@@ -56,8 +56,13 @@ public class RedisDistributedLock {
         String nonce = UUID.randomUUID().toString();
 
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            Boolean acquired = redisTemplate.opsForValue()
-                    .setIfAbsent(key, nonce, Duration.ofMillis(lockTtlMs));
+            Boolean acquired;
+            try {
+                acquired = redisTemplate.opsForValue().setIfAbsent(key, nonce, Duration.ofMillis(lockTtlMs));
+            } catch (DataAccessException ex) {
+                log.warn("Redis unavailable for booking lock; continuing with database concurrency controls", ex);
+                return "redis-bypass:" + nonce;
+            }
 
             if (Boolean.TRUE.equals(acquired)) {
                 log.debug("Acquired Redis lock for resource={} nonce={} attempt={}", resourceId, nonce, attempt);
@@ -92,9 +97,12 @@ public class RedisDistributedLock {
                     return 0
                 end
                 """;
-        redisTemplate.execute(
-                new org.springframework.data.redis.core.script.DefaultRedisScript<>(lua, Long.class),
-                java.util.List.of(key), nonce);
+        try {
+            redisTemplate.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>(lua, Long.class),
+                    java.util.List.of(key), nonce);
+        } catch (DataAccessException ex) {
+            log.warn("Redis unavailable while releasing booking lock for resource={}", resourceId);
+        }
         log.debug("Released Redis lock for resource={}", resourceId);
     }
 }

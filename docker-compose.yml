@@ -1,21 +1,19 @@
-version: '3.9'
-
 services:
   # ─── Infrastructure ─────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: booking-postgres
     environment:
-      POSTGRES_USER: bookinguser
-      POSTGRES_PASSWORD: bookingpass
-      POSTGRES_DB: bookingdb
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-bookingdb}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bookinguser -d bookingdb"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -44,12 +42,12 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -57,6 +55,7 @@ services:
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
     ports:
       - "9092:9092"
+      - "29092:29092"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
@@ -75,12 +74,13 @@ services:
     container_name: user-service
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/bookingdb
-      SPRING_DATASOURCE_USERNAME: bookinguser
-      SPRING_DATASOURCE_PASSWORD: bookingpass
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?Set POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
       SERVER_PORT: 8081
-      JWT_SECRET: "ThisIsASecretKeyForJWTTokenGenerationMustBe32CharsLong!!"
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?Set JWT_PRIVATE_KEY to a base64 PKCS#8 RSA private key}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?Set JWT_PUBLIC_KEY to a base64 X.509 RSA public key}
     ports:
       - "8081:8081"
     depends_on:
@@ -103,13 +103,13 @@ services:
     container_name: booking-service
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/bookingdb
-      SPRING_DATASOURCE_USERNAME: bookinguser
-      SPRING_DATASOURCE_PASSWORD: bookingpass
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?Set POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SERVER_PORT: 8082
-      JWT_SECRET: "ThisIsASecretKeyForJWTTokenGenerationMustBe32CharsLong!!"
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?Set JWT_PUBLIC_KEY to a base64 X.509 RSA public key}
       INVENTORY_SERVICE_URL: http://inventory-service:8083
       USER_SERVICE_URL: http://user-service:8081
     ports:
@@ -136,12 +136,13 @@ services:
     container_name: inventory-service
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/bookingdb
-      SPRING_DATASOURCE_USERNAME: bookinguser
-      SPRING_DATASOURCE_PASSWORD: bookingpass
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?Set POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SERVER_PORT: 8083
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:?Set JWT_PUBLIC_KEY to a base64 X.509 RSA public key}
     ports:
       - "8083:8083"
     depends_on:
@@ -166,8 +167,8 @@ services:
     container_name: notification-service
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/bookingdb
-      SPRING_DATASOURCE_USERNAME: bookinguser
-      SPRING_DATASOURCE_PASSWORD: bookingpass
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:?Set POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092

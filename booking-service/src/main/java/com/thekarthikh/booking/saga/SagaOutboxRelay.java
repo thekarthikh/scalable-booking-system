@@ -1,6 +1,5 @@
 package com.thekarthikh.booking.saga;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thekarthikh.booking.entity.SagaEvent;
 import com.thekarthikh.booking.repository.SagaEventRepository;
 import lombok.RequiredArgsConstructor;
@@ -9,6 +8,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Value;
+
+import java.time.Duration;
 
 import java.util.List;
 
@@ -16,8 +18,8 @@ import java.util.List;
  * Transactional Outbox relay.
  *
  * Saga events are first written to the {@code saga_events} table inside the
- * same DB transaction as the booking write — guaranteeing atomicity between
- * the database state and Kafka event emission.
+ * same DB transaction as the booking write — making the database change and
+ * the durable publication intent atomic. Kafka delivery is still fallible.
  *
  * A scheduled poller then reads un-published events and forwards them to Kafka,
  * marking each as published only after the send succeeds.  This gives us
@@ -32,7 +34,8 @@ public class SagaOutboxRelay {
 
     private final SagaEventRepository   sagaEventRepository;
     private final KafkaTemplate<String, String> kafkaTemplate;
-    private final ObjectMapper          objectMapper;
+    @Value("${saga.outbox.send-timeout:5s}")
+    private Duration sendTimeout;
 
     /**
      * Publishes un-sent outbox events every 500 ms.
@@ -41,19 +44,16 @@ public class SagaOutboxRelay {
     @Scheduled(fixedDelay = 500)
     @Transactional
     public void relayEvents() {
-        List<SagaEvent> pending = sagaEventRepository.findUnpublishedEvents();
+        List<SagaEvent> pending = sagaEventRepository.findUnpublishedEventsForUpdate();
         for (SagaEvent event : pending) {
             try {
                 kafkaTemplate.send(BOOKING_TOPIC, event.getBookingId().toString(), event.getPayload())
-                        .whenComplete((result, ex) -> {
-                            if (ex != null) {
-                                log.error("Failed to publish saga event id={}: {}", event.getId(), ex.getMessage());
-                            }
-                        });
+                        .get(sendTimeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
                 event.setPublished(true);
                 sagaEventRepository.save(event);
             } catch (Exception e) {
                 log.error("Error relaying saga event id={}: {}", event.getId(), e.getMessage());
+                break;
             }
         }
     }

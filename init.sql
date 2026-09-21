@@ -2,6 +2,8 @@
 -- Scalable Booking System – Database Schema
 -- ============================================================
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ─── Users ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -39,11 +41,37 @@ CREATE TABLE IF NOT EXISTS bookings (
     saga_status     VARCHAR(50) NOT NULL DEFAULT 'STARTED',
     failure_reason  TEXT,
     created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMP NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_booking_status CHECK (status IN ('PENDING', 'CONFIRMED', 'CANCELLED')),
+    CONSTRAINT chk_booking_saga_status CHECK (saga_status IN ('STARTED', 'INVENTORY_RESERVED', 'INVENTORY_FAILED', 'CANCELLED_BY_USER'))
 );
 
 -- ─── Saga Events (outbox pattern) ────────────────────────────
 CREATE TABLE IF NOT EXISTS saga_events (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id  UUID NOT NULL,
+    event_type  VARCHAR(100) NOT NULL,
+    payload     TEXT NOT NULL,
+    published   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Inventory reservation ledger.  The booking id is unique so Kafka redelivery
+-- cannot deduct the same reservation twice.
+CREATE TABLE IF NOT EXISTS inventory_reservations (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id  UUID NOT NULL UNIQUE,
+    item_id     UUID NOT NULL REFERENCES inventory_items(id),
+    quantity    INT NOT NULL CHECK (quantity > 0),
+    status      VARCHAR(20) NOT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Inventory's own outbox keeps the reservation write and response event
+-- durable without pretending that a database transaction and Kafka are one
+-- distributed transaction.
+CREATE TABLE IF NOT EXISTS inventory_saga_events (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     booking_id  UUID NOT NULL,
     event_type  VARCHAR(100) NOT NULL,
@@ -70,7 +98,14 @@ CREATE INDEX IF NOT EXISTS idx_bookings_item_id    ON bookings(item_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_status     ON bookings(status);
 CREATE INDEX IF NOT EXISTS idx_bookings_idempkey   ON bookings(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_saga_events_booking ON saga_events(booking_id);
+CREATE INDEX IF NOT EXISTS idx_saga_events_pending ON saga_events(published, created_at);
+CREATE INDEX IF NOT EXISTS idx_inventory_saga_events_pending ON inventory_saga_events(published, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_saga_events_booking_type
+    ON inventory_saga_events(booking_id, event_type);
 CREATE INDEX IF NOT EXISTS idx_notifications_user  ON notifications(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notifications_booking_type
+    ON notifications(booking_id, type)
+    WHERE booking_id IS NOT NULL;
 
 -- ─── Seed Data ───────────────────────────────────────────────
 INSERT INTO inventory_items (id, name, description, total_capacity, available, price)

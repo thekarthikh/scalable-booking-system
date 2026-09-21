@@ -13,7 +13,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/bookingdb}
     username: ${SPRING_DATASOURCE_USERNAME:bookinguser}
-    password: ${SPRING_DATASOURCE_PASSWORD:bookingpass}
+    password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 50
@@ -32,6 +32,11 @@ spring:
         jdbc.batch_size: 50
         order_inserts: true
         order_updates: true
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+    baseline-description: existing-init-sql
   data:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}
@@ -45,7 +50,9 @@ spring:
           max-wait: 1000ms
 
 jwt:
-  secret: ${JWT_SECRET:ThisIsASecretKeyForJWTTokenGenerationMustBe32CharsLong!!}
+  private-key: ${JWT_PRIVATE_KEY:#{null}}
+  public-key: ${JWT_PUBLIC_KEY:#{null}}
+  allow-generated-keys: ${JWT_ALLOW_GENERATED_KEYS:false}
   expiration-ms: 86400000   # 24 hours
 
 management:

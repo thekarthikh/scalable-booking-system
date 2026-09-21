@@ -6,6 +6,8 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.*;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 
@@ -38,7 +40,13 @@ public class UserController {
 
     /** Get user by ID (service-to-service or admin use). */
     @GetMapping("/users/{id}")
-    public ResponseEntity<UserResponse> getById(@PathVariable UUID id) {
+    public ResponseEntity<UserResponse> getById(@PathVariable UUID id, Authentication authentication) {
+        UserResponse caller = userService.getUserByUsername(authentication.getName());
+        boolean admin = authentication.getAuthorities().stream()
+                .anyMatch(authority -> "ROLE_ADMIN".equals(authority.getAuthority()));
+        if (!admin && !caller.getId().equals(id)) {
+            throw new AccessDeniedException("Users may only access their own profile");
+        }
         return ResponseEntity.ok(userService.getUserById(id));
     }
 

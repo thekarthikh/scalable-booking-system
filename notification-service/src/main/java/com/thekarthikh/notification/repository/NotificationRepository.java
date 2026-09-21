@@ -10,4 +10,5 @@ import java.util.UUID;
 @Repository
 public interface NotificationRepository extends JpaRepository<Notification, UUID> {
     List<Notification> findByUserId(UUID userId);
+    boolean existsByBookingIdAndType(UUID bookingId, String type);
 }

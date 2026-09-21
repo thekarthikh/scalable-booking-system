@@ -5,6 +5,7 @@ import com.thekarthikh.booking.entity.Booking;
 import com.thekarthikh.booking.entity.SagaEvent;
 import com.thekarthikh.booking.repository.BookingRepository;
 import com.thekarthikh.booking.repository.SagaEventRepository;
+import com.thekarthikh.booking.state.BookingStateMachine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -52,19 +53,20 @@ public class SagaChoreographyCoordinator {
                 default -> log.warn("Unknown saga event type={}", message.getEventType());
             }
         } catch (Exception e) {
-            log.error("Error processing inventory event: {}", e.getMessage(), e);
+            throw new IllegalStateException("Unable to process inventory saga event", e);
         }
     }
 
     private void handleInventoryReserved(SagaMessage message) throws Exception {
-        Optional<Booking> opt = bookingRepository.findById(message.getBookingId());
+        Optional<Booking> opt = bookingRepository.findByIdWithPessimisticLock(message.getBookingId());
         if (opt.isEmpty()) {
             log.error("Booking not found for INVENTORY_RESERVED: {}", message.getBookingId());
             return;
         }
         Booking booking = opt.get();
-        if ("CONFIRMED".equals(booking.getStatus())) {
-            log.info("Booking {} already CONFIRMED — skipping duplicate event", booking.getId());
+        if (!BookingStateMachine.canTransition(booking.getStatus(), "CONFIRMED")) {
+            log.info("Booking {} is already terminal ({}) — ignoring duplicate/out-of-order reservation event",
+                    booking.getId(), booking.getStatus());
             return;
         }
 
@@ -93,17 +95,19 @@ public class SagaChoreographyCoordinator {
     }
 
     private void handleInventoryFailed(SagaMessage message) throws Exception {
-        Optional<Booking> opt = bookingRepository.findById(message.getBookingId());
+        Optional<Booking> opt = bookingRepository.findByIdWithPessimisticLock(message.getBookingId());
         if (opt.isEmpty()) {
             log.error("Booking not found for INVENTORY_FAILED: {}", message.getBookingId());
             return;
         }
         Booking booking = opt.get();
-        if ("CANCELLED".equals(booking.getStatus())) {
-            log.info("Booking {} already CANCELLED — skipping duplicate event", booking.getId());
+        if (!BookingStateMachine.canTransition(booking.getStatus(), "CANCELLED")) {
+            log.info("Booking {} is already terminal ({}) — skipping stale failure event",
+                    booking.getId(), booking.getStatus());
             return;
         }
 
+        BookingStateMachine.requireTransition(booking.getStatus(), "CANCELLED");
         booking.setStatus("CANCELLED");
         booking.setSagaStatus("INVENTORY_FAILED");
         booking.setFailureReason(message.getFailureReason());

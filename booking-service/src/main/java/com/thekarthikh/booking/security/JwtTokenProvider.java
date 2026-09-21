@@ -17,12 +17,10 @@ public class JwtTokenProvider {
     private final PublicKey publicKey;
 
     public JwtTokenProvider(@Value("${jwt.public-key:#{null}}") String publicKeyStr) throws Exception {
-        if (publicKeyStr == null) {
-            log.warn("JWT RSA public key not provided. System will fail to verify tokens until provided.");
-            this.publicKey = null;
-        } else {
-            this.publicKey = loadPublicKey(publicKeyStr);
+        if (publicKeyStr == null || publicKeyStr.isBlank()) {
+            throw new IllegalStateException("JWT_PUBLIC_KEY must be configured");
         }
+        this.publicKey = loadPublicKey(publicKeyStr);
     }
 
     public String getUsernameFromToken(String token) {
@@ -38,12 +36,11 @@ public class JwtTokenProvider {
     }
 
     public boolean validateToken(String token) {
-        if (publicKey == null) return false;
         try {
             parseClaims(token);
             return true;
         } catch (JwtException | IllegalArgumentException ex) {
-            log.warn("Invalid JWT token: {}", ex.getMessage());
+            log.warn("Invalid JWT token type={}", ex.getClass().getSimpleName());
             return false;
         }
     }

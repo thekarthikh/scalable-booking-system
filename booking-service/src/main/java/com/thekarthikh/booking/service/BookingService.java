@@ -16,12 +16,13 @@ import com.thekarthikh.booking.repository.BookingRepository;
 import com.thekarthikh.booking.repository.SagaEventRepository;
 import com.thekarthikh.booking.saga.SagaEventTypes;
 import com.thekarthikh.booking.saga.SagaMessage;
+import com.thekarthikh.booking.state.BookingStateMachine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -53,8 +54,8 @@ import java.util.stream.Collectors;
  *         │   during a GC pause) and retries with exponential back-off.
  *
  * Step 6 │ Saga choreography — BOOKING_CREATED event → InventoryService
- *         │ ➜ Published via transactional outbox so the event is guaranteed
- *         │   to reach Kafka only after the DB transaction commits.
+ *         │ ➜ Stored via a transactional outbox so publication is attempted
+ *         │   only after the DB transaction commits.
  * ══════════════════════════════════════════════════════════════════════
  */
 @Slf4j
@@ -64,6 +65,7 @@ public class BookingService {
 
     private final BookingRepository    bookingRepository;
     private final SagaEventRepository  sagaEventRepository;
+    private final BookingTransactionService bookingTransactionService;
     private final IdempotencyService   idempotencyService;
     private final RedisDistributedLock redisDistributedLock;
     private final OptimisticLockGuard  optimisticLockGuard;
@@ -76,19 +78,29 @@ public class BookingService {
     // ─────────────────────────────────────────────────────────────────
 
     public BookingResponse createBooking(UUID userId, CreateBookingRequest req) {
+        String requestFingerprint = IdempotencyService.fingerprint(userId, req.getItemId(), req.getQuantity());
         // ── Step 1: Idempotency ──────────────────────────────────────
-        var cached = idempotencyService.getResponse(req.getIdempotencyKey());
+        var cached = idempotencyService.getResponse(req.getIdempotencyKey(), requestFingerprint);
         if (cached.isPresent()) {
             log.info("Returning cached response for idempotency key={}", req.getIdempotencyKey());
             return deserialize(cached.get());
         }
 
-        // ── Step 2: Rate limiter ─────────────────────────────────────
+        // ── Step 2: Reserve idempotency key ──────────────────────────
+        String idempotencyLockNonce = idempotencyService.reserveKey(req.getIdempotencyKey());
+        if (idempotencyLockNonce == null) {
+            return bookingTransactionService.findMatchingByIdempotencyKey(userId, req)
+                    .orElseThrow(() -> new OptimisticLockConflictException(
+                            "Another request with this idempotency key is still processing"));
+        }
+
+        try {
+        // ── Step 3: Rate limiter ─────────────────────────────────────
         if (!rateLimiter.tryAcquire(userId.toString())) {
             throw new RateLimitExceededException("Rate limit exceeded. Please slow down.");
         }
 
-        // ── Step 3: Redis distributed lock ───────────────────────────
+        // ── Step 4: Redis distributed lock ───────────────────────────
         String lockNonce = redisDistributedLock.acquireLock(req.getItemId().toString());
         if (lockNonce == null) {
             throw new OptimisticLockConflictException(
@@ -97,17 +109,29 @@ public class BookingService {
 
         try {
             // ── Steps 4 & 5 wrapped in optimistic-lock retry ─────────
-            BookingResponse response = optimisticLockGuard.executeWithRetry(
-                    () -> executeCreateBooking(userId, req),
-                    "createBooking:item=" + req.getItemId()
-            );
+            InventoryItemDto item = inventoryClient.getItem(req.getItemId());
+            if (item == null) {
+                throw new DownstreamServiceUnavailableException("InventoryService unavailable — please retry");
+            }
+            BookingResponse response;
+            try {
+                response = optimisticLockGuard.executeWithRetry(
+                        () -> bookingTransactionService.createPendingBooking(userId, req, item),
+                        "createBooking:item=" + req.getItemId());
+            } catch (DataIntegrityViolationException duplicateRace) {
+                response = bookingTransactionService.findMatchingByIdempotencyKey(userId, req)
+                        .orElseThrow(() -> duplicateRace);
+            }
 
             // ── Cache response for idempotency ────────────────────────
-            idempotencyService.saveResponse(req.getIdempotencyKey(), serialize(response));
+            idempotencyService.saveResponse(req.getIdempotencyKey(), requestFingerprint, serialize(response));
             return response;
 
         } finally {
             redisDistributedLock.releaseLock(req.getItemId().toString(), lockNonce);
+        }
+        } finally {
+            idempotencyService.releaseKeyLock(req.getIdempotencyKey(), idempotencyLockNonce);
         }
     }
 
@@ -129,7 +153,7 @@ public class BookingService {
 
     @Transactional
     public BookingResponse cancelBooking(UUID bookingId, UUID requestingUserId) {
-        Booking booking = bookingRepository.findById(bookingId)
+        Booking booking = bookingRepository.findByIdWithPessimisticLock(bookingId)
                 .orElseThrow(() -> new BookingNotFoundException("Booking not found: " + bookingId));
         if (!booking.getUserId().equals(requestingUserId)) {
             throw new BookingNotFoundException("Booking not found: " + bookingId);
@@ -137,6 +161,7 @@ public class BookingService {
         if ("CANCELLED".equals(booking.getStatus())) {
             return toResponse(booking);
         }
+        BookingStateMachine.requireTransition(booking.getStatus(), "CANCELLED");
         booking.setStatus("CANCELLED");
         booking.setSagaStatus("CANCELLED_BY_USER");
         bookingRepository.save(booking);
@@ -157,7 +182,7 @@ public class BookingService {
                     .payload(objectMapper.writeValueAsString(msg))
                     .build());
         } catch (Exception e) {
-            log.error("Failed to enqueue cancellation saga event", e);
+            throw new IllegalStateException("Failed to enqueue cancellation saga event", e);
         }
         return toResponse(booking);
     }
@@ -170,56 +195,6 @@ public class BookingService {
      * Layers 1 & 4: DB transaction  +  core business logic.
      * Called inside the optimistic-lock retry loop (Layer 3).
      */
-    @Transactional
-    protected BookingResponse executeCreateBooking(UUID userId, CreateBookingRequest req) {
-        // Layer 1 — check idempotency key uniqueness at DB level
-        if (bookingRepository.findByIdempotencyKey(req.getIdempotencyKey()).isPresent()) {
-            throw new DuplicateBookingException(
-                    "Booking with idempotency key " + req.getIdempotencyKey() + " already exists");
-        }
-
-        // Fetch item price from InventoryService
-        InventoryItemDto item = inventoryClient.getItem(req.getItemId());
-        if (item == null) {
-            throw new RuntimeException("InventoryService unavailable — please retry");
-        }
-
-        BigDecimal totalPrice = item.getPrice().multiply(BigDecimal.valueOf(req.getQuantity()));
-
-        Booking booking = Booking.builder()
-                .idempotencyKey(req.getIdempotencyKey())
-                .userId(userId)
-                .itemId(req.getItemId())
-                .quantity(req.getQuantity())
-                .totalPrice(totalPrice)
-                .status("PENDING")
-                .sagaStatus("STARTED")
-                .build();
-        booking = bookingRepository.save(booking);
-
-        // Publish BOOKING_CREATED to Saga outbox (same transaction)
-        try {
-            SagaMessage msg = SagaMessage.builder()
-                    .eventType(SagaEventTypes.BOOKING_CREATED)
-                    .bookingId(booking.getId())
-                    .userId(userId)
-                    .itemId(req.getItemId())
-                    .quantity(req.getQuantity())
-                    .totalPrice(totalPrice)
-                    .timestamp(System.currentTimeMillis())
-                    .build();
-            sagaEventRepository.save(SagaEvent.builder()
-                    .bookingId(booking.getId())
-                    .eventType(SagaEventTypes.BOOKING_CREATED)
-                    .payload(objectMapper.writeValueAsString(msg))
-                    .build());
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to enqueue saga event", e);
-        }
-
-        log.info("Booking created id={} userId={} itemId={}", booking.getId(), userId, req.getItemId());
-        return toResponse(booking);
-    }
 
     private BookingResponse toResponse(Booking b) {
         return BookingResponse.builder()

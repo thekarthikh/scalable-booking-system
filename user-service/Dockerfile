@@ -6,6 +6,7 @@ RUN apk add --no-cache maven && mvn -q clean package -DskipTests
 
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
+RUN apk add --no-cache curl
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 COPY --from=builder /app/target/*.jar app.jar
 RUN chown appuser:appgroup app.jar

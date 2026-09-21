@@ -3,6 +3,7 @@ package com.thekarthikh.booking.lock;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -17,9 +18,8 @@ import java.util.List;
  *  4. If tokens ≥ 1, decrement and allow the request.
  *  5. Otherwise, reject.
  *
- * Running inside a single Lua script guarantees atomicity — no two clients
- * can race on the same key.  This satisfies the 10K-concurrent-user target
- * without a DB round-trip for every request.
+ * Running inside a single Lua script makes each bucket update atomic; it is a
+ * protection mechanism, not a measured capacity or concurrency guarantee.
  */
 @Slf4j
 @Component
@@ -65,14 +65,17 @@ public class RedisRateLimiter {
     private final StringRedisTemplate redisTemplate;
     private final long capacity;
     private final long refillRate;
+    private final boolean failOpen;
 
     public RedisRateLimiter(
             StringRedisTemplate redisTemplate,
             @org.springframework.beans.factory.annotation.Value("${redis.rate-limiter.capacity:1000}") long capacity,
-            @org.springframework.beans.factory.annotation.Value("${redis.rate-limiter.refill-rate:200}") long refillRate) {
+            @org.springframework.beans.factory.annotation.Value("${redis.rate-limiter.refill-rate:200}") long refillRate,
+            @org.springframework.beans.factory.annotation.Value("${redis.rate-limiter.fail-open:true}") boolean failOpen) {
         this.redisTemplate = redisTemplate;
         this.capacity = capacity;
         this.refillRate = refillRate;
+        this.failOpen = failOpen;
     }
 
     /**
@@ -85,13 +88,14 @@ public class RedisRateLimiter {
         String key    = KEY_PREFIX + clientId;
         long   nowSec = System.currentTimeMillis() / 1000;
 
-        Long result = redisTemplate.execute(
-                TOKEN_BUCKET_SCRIPT,
-                List.of(key),
-                String.valueOf(capacity),
-                String.valueOf(refillRate),
-                String.valueOf(nowSec)
-        );
+        Long result;
+        try {
+            result = redisTemplate.execute(TOKEN_BUCKET_SCRIPT, List.of(key),
+                    String.valueOf(capacity), String.valueOf(refillRate), String.valueOf(nowSec));
+        } catch (DataAccessException ex) {
+            log.warn("Redis unavailable for rate limiting; failOpen={}", failOpen, ex);
+            return failOpen;
+        }
 
         boolean allowed = Long.valueOf(1L).equals(result);
         if (!allowed) {

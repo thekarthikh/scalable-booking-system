@@ -2,12 +2,15 @@ package com.thekarthikh.inventory.saga;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.thekarthikh.inventory.entity.InventoryItem;
+import com.thekarthikh.inventory.entity.InventoryReservation;
+import com.thekarthikh.inventory.entity.InventorySagaEvent;
 import com.thekarthikh.inventory.repository.InventoryRepository;
+import com.thekarthikh.inventory.repository.InventoryReservationRepository;
+import com.thekarthikh.inventory.repository.InventorySagaEventRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,7 +36,8 @@ public class InventorySagaListener {
     private static final String INVENTORY_TOPIC = "inventory-events";
 
     private final InventoryRepository          inventoryRepository;
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final InventoryReservationRepository reservationRepository;
+    private final InventorySagaEventRepository eventRepository;
     private final ObjectMapper                 objectMapper;
 
     @KafkaListener(
@@ -53,7 +57,7 @@ public class InventorySagaListener {
                 handleBookingCancelled(message);
             }
         } catch (Exception e) {
-            log.error("Error processing booking event in inventory: {}", e.getMessage(), e);
+            throw new IllegalStateException("Unable to process booking event", e);
         }
     }
 
@@ -61,10 +65,30 @@ public class InventorySagaListener {
         UUID itemId   = message.getItemId();
         int quantity  = message.getQuantity();
 
+        Optional<InventoryReservation> existing = reservationRepository.findByBookingIdWithLock(message.getBookingId());
+        if (existing.isPresent()) {
+            if ("RESERVED".equals(existing.get().getStatus())) {
+                enqueueEvent("INVENTORY_RESERVED", message);
+            }
+            return;
+        }
+
         // Layer 1: DB row lock — SELECT FOR UPDATE
         Optional<InventoryItem> opt = inventoryRepository.findByIdWithLock(itemId);
         if (opt.isEmpty()) {
             publishFailure(message, "Item not found: " + itemId);
+            return;
+        }
+
+        // A duplicate can have waited on the item row lock while the first
+        // transaction created the ledger record. Re-check after the lock so
+        // the duplicate is acknowledged without a second stock deduction.
+        Optional<InventoryReservation> afterItemLock =
+                reservationRepository.findByBookingIdWithLock(message.getBookingId());
+        if (afterItemLock.isPresent()) {
+            if ("RESERVED".equals(afterItemLock.get().getStatus())) {
+                enqueueEvent("INVENTORY_RESERVED", message);
+            }
             return;
         }
 
@@ -80,6 +104,13 @@ public class InventorySagaListener {
         item.setAvailable(item.getAvailable() - quantity);
         inventoryRepository.save(item);
 
+        reservationRepository.save(InventoryReservation.builder()
+                .bookingId(message.getBookingId())
+                .itemId(itemId)
+                .quantity(quantity)
+                .status("RESERVED")
+                .build());
+
         // Publish INVENTORY_RESERVED
         SagaMessage response = SagaMessage.builder()
                 .eventType("INVENTORY_RESERVED")
@@ -91,8 +122,7 @@ public class InventorySagaListener {
                 .timestamp(System.currentTimeMillis())
                 .build();
 
-        kafkaTemplate.send(INVENTORY_TOPIC, message.getBookingId().toString(),
-                objectMapper.writeValueAsString(response));
+        saveEventIfAbsent(response);
 
         log.info("Inventory reserved itemId={} quantity={} for bookingId={}",
                 itemId, quantity, message.getBookingId());
@@ -100,26 +130,29 @@ public class InventorySagaListener {
 
     private void handleBookingCancelled(SagaMessage message) throws Exception {
         UUID itemId = message.getItemId();
-        inventoryRepository.findByIdWithLock(itemId).ifPresent(item -> {
-            item.setAvailable(Math.min(item.getAvailable() + message.getQuantity(), item.getTotalCapacity()));
-            inventoryRepository.save(item);
-            log.info("Inventory released itemId={} quantity={} for cancelled booking={}",
-                    itemId, message.getQuantity(), message.getBookingId());
-        });
-
-        SagaMessage response = SagaMessage.builder()
-                .eventType("INVENTORY_RELEASED")
-                .bookingId(message.getBookingId())
-                .itemId(itemId)
-                .quantity(message.getQuantity())
-                .timestamp(System.currentTimeMillis())
-                .build();
-        try {
-            kafkaTemplate.send(INVENTORY_TOPIC, message.getBookingId().toString(),
-                    objectMapper.writeValueAsString(response));
-        } catch (Exception e) {
-            log.error("Failed to publish INVENTORY_RELEASED", e);
+        Optional<InventoryReservation> reservation = reservationRepository.findByBookingIdWithLock(message.getBookingId());
+        if (reservation.isEmpty()) {
+            // Keep a tombstone so a stale BOOKING_CREATED event cannot reserve
+            // stock after cancellation was already observed out of order.
+            reservationRepository.save(InventoryReservation.builder()
+                    .bookingId(message.getBookingId())
+                    .itemId(itemId)
+                    .quantity(message.getQuantity())
+                    .status("CANCELLED")
+                    .build());
+            return;
         }
+        if (!"RESERVED".equals(reservation.get().getStatus())) {
+            return;
+        }
+        inventoryRepository.findByIdWithLock(itemId).ifPresent(item -> {
+            item.setAvailable(Math.min(item.getAvailable() + reservation.get().getQuantity(), item.getTotalCapacity()));
+            inventoryRepository.save(item);
+            reservation.get().setStatus("RELEASED");
+            reservationRepository.save(reservation.get());
+            log.info("Inventory released itemId={} quantity={} for cancelled booking={}",
+                    itemId, reservation.get().getQuantity(), message.getBookingId());
+        });
     }
 
     private void publishFailure(SagaMessage original, String reason) throws Exception {
@@ -132,8 +165,27 @@ public class InventorySagaListener {
                 .failureReason(reason)
                 .timestamp(System.currentTimeMillis())
                 .build();
-        kafkaTemplate.send(INVENTORY_TOPIC, original.getBookingId().toString(),
-                objectMapper.writeValueAsString(failure));
+        saveEventIfAbsent(failure);
         log.warn("Published INVENTORY_FAILED for bookingId={}: {}", original.getBookingId(), reason);
+    }
+
+    private void enqueueEvent(String eventType, SagaMessage original) throws Exception {
+        SagaMessage response = SagaMessage.builder()
+                .eventType(eventType)
+                .bookingId(original.getBookingId())
+                .userId(original.getUserId())
+                .itemId(original.getItemId())
+                .quantity(original.getQuantity())
+                .totalPrice(original.getTotalPrice())
+                .timestamp(System.currentTimeMillis())
+                .build();
+        saveEventIfAbsent(response);
+    }
+
+    private void saveEventIfAbsent(SagaMessage message) throws Exception {
+        eventRepository.insertIfAbsent(
+                message.getBookingId(),
+                message.getEventType(),
+                objectMapper.writeValueAsString(message));
     }
 }

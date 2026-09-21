@@ -3,6 +3,7 @@ package com.thekarthikh.inventory.service;
 import com.thekarthikh.inventory.dto.CreateInventoryItemRequest;
 import com.thekarthikh.inventory.dto.InventoryItemResponse;
 import com.thekarthikh.inventory.entity.InventoryItem;
+import com.thekarthikh.inventory.exception.InventoryItemNotFoundException;
 import com.thekarthikh.inventory.repository.InventoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,7 +45,7 @@ public class InventoryService {
     @Transactional(readOnly = true)
     public InventoryItemResponse getItem(UUID id) {
         InventoryItem item = inventoryRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Item not found: " + id));
+                .orElseThrow(() -> new InventoryItemNotFoundException("Item not found: " + id));
         return mapToResponse(item);
     }
 

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This microservices system is designed for high-concurrency and reliability.
+This guide describes the local development deployment. It does not certify production capacity or availability.
 
 ## Local Deployment
 
@@ -16,14 +16,18 @@ This microservices system is designed for high-concurrency and reliability.
    ```
 
 3. **Step 2: Start all services**
+   Export `POSTGRES_USER`, `POSTGRES_PASSWORD`, `JWT_PRIVATE_KEY`, and
+   `JWT_PUBLIC_KEY` first. Compose intentionally fails when required values
+   are missing.
    ```bash
-   docker-compose up --build
+   docker compose up --build
    ```
 
 4. **Step 3: Access Infrastructure**
    - **PostgreSQL**: `localhost:5432` (bookingdb)
    - **Redis**: `localhost:6379`
-   - **Kafka**: `localhost:9092`
+   - **Kafka (Docker network)**: `kafka:9092`
+   - **Kafka (host-launched JARs)**: `localhost:29092`
 
 5. **Step 4: Verify Services**
    - User Service: `http://localhost:8081/actuator/health`
@@ -31,16 +35,9 @@ This microservices system is designed for high-concurrency and reliability.
    - Inventory Service: `http://localhost:8083/actuator/health`
    - Notification Service: `http://localhost:8084/actuator/health`
 
-## Railway Deployment
-
-1. **Install Railway CLI**: `npm i -g @railway/cli`
-2. **Login**: `railway login`
-3. **Initialize Project**: `railway init`
-4. **Link Database**: Add Postgres and Redis plugins via Railway Dashboard.
-5. **Set Environment Variables**: Copy from `docker-compose.yml` properties.
-6. **Deploy**: `railway up`
-
 ## Load Testing
-Use `k6` or `JMeter` with the provided `postman-collection.json` as a base. Recommendation:
-- Peak load: 10K concurrent users.
-- Constant load: 2K requests/sec.
+
+The repository includes `scripts/booking-load-test.ps1`. It is a command-line
+harness, not a published benchmark. Record the machine, Java version, warmup,
+concurrency, duration, request mix, success rate, throughput, p50/p95/p99
+latency, and final inventory correctness for each real run.
